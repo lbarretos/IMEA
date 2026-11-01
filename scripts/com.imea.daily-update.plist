@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Modelo do agente launchd: segunda a sexta às 19:00 (hora local do Mac).
+  Se o Mac estiver dormindo nesse horário, o launchd roda assim que ele acordar.
+  Não copie à mão: scripts/install_schedule.sh preenche __PROJECT_DIR__ e __HOME__ e instala.
+  Rodar agora:  launchctl kickstart gui/$(id -u)/com.imea.daily-update
+  Logs:         ~/Library/Logs/imea/update.log
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.imea.daily-update</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__PROJECT_DIR__/scripts/update_daily.sh</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key>
+    <string>__HOME__</string>
+  </dict>
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>19</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>19</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>19</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Weekday</key><integer>4</integer><key>Hour</key><integer>19</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>19</integer><key>Minute</key><integer>0</integer></dict>
+  </array>
+  <key>RunAtLoad</key>
+  <false/>
+  <!-- Logs fora de ~/Documents: o launchd abre esses arquivos antes do script rodar -->
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/imea/update.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/imea/update.log</string>
+</dict>
+</plist>
