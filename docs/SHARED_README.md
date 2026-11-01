@@ -28,6 +28,7 @@ Gerado pelo projeto https://github.com/lbarretos/IMEA. Última atualização des
 - `crop`: `Soy`, `Corn`, `Cotton`. `activity`: `Planting`, `Harvest`, `Commercialization`.
 - `harvest_season`: safra, ex. `25/26`. Na comercialização, 2–3 safras ficam abertas ao mesmo tempo.
 - `percentage`: % acumulado da safra, de 0 a 100.
+- `first_seen_at`: quando a atualização automática viu o ponto pela primeira vez (revisões posteriores não mudam esse valor). Vazio para pontos que já existiam em 01/11/2026.
 
 ### `crop_summary` — formato largo, uma linha por data × cultura × safra
 `planted_percentage, harvested_percentage, commercialized_percentage`
@@ -36,6 +37,7 @@ Gerado pelo projeto https://github.com/lbarretos/IMEA. Última atualização des
 
 ### `crop_prices` — cotações, custos e estimativas
 - **`IndicadorFinalId` diz o que o número é** (preço disponível, preço médio mensal, custo, área...). Sempre filtre por ele ou, no mínimo, por `UnidadeSigla`. Os arquivos misturam R$/sc, R$/t, R$/@, R$/ha, ha, t, sc/ha e %.
+- `indicator_name` traz o nome do indicador (ex. "Preço soja disponível compra"). Fica vazio para indicadores sem nenhum dado na API, que em geral também vêm sem `value`. A lista completa está na tabela `indicators` (`IndicadorFinalId`, `indicator_name`, `indicator_group`); para achar um ID, busque por nome: `SELECT * FROM indicators WHERE indicator_name LIKE '%milho%'`.
 - `Localidade`: município, região ou "Mato Grosso". Às vezes é um tipo de semente ("Convencional", "Transgênica").
 - `publication_date` pode vir vazio. O IMEA só fornece o valor mais recente de cada cotação, então o histórico de preços diários começa em 01/11/2026 e cresce a cada execução.
 - IDs úteis: `708192508838936580` = soja disponível R$/sc por praça; `708192508838936581` = milho disponível R$/sc por praça; `701194393889800192` = preço médio mensal de comercialização de milho (R$/sc); `702651198968954880` = idem soja.

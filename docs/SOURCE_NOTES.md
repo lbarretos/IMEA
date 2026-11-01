@@ -25,6 +25,7 @@ O que já foi testado contra `https://api1.imea.com.br` e o que se concluiu, par
 - A própria API repete linhas: em 12.161 linhas, 344 repetem a chave, 120 são idênticas e 38 chaves têm valores diferentes. `Variacao = -99` aparece como valor sentinela nessas repetições.
 - Cerca de 1/3 das linhas vem sem `DataPublicacao`.
 - Também traz os indicadores de avanço (%), com o último ponto de cada safra.
+- **Não traz o nome do indicador.** O nome sai de `/api/seriehistorica` com `indicador: [id]`, `tipolocalidade: []` e uma janela ampla (2010 até o ano seguinte): qualquer linha devolvida tem `IndicadorFinalNome` e `IndicadorGrupoDescricao`. Testado em 01/11/2026: 229 de 356 IDs têm nome. Os 127 restantes (ex. 3, 4 e a faixa `1516955774961582xxx`, custos em R$/ha) não devolvem nenhuma linha e também vêm sem `Valor` nas cotações. Consultar os 356 em sequência leva ~3 minutos, por isso o extrator guarda os nomes em `BR_IMEA_INDICATOR_NAMES.csv`.
 
 ## Hipóteses já testadas
 
@@ -77,10 +78,12 @@ Padrão de nov/2025 a nov/2026 para soja, milho e algodão:
 
 ### Atraso de publicação
 
-O Informe de Semeadura de soja de sexta 30/10/2026 (15:00) estava no calendário, mas no domingo 01/11 a API ainda tinha 23/10 como último ponto do plantio de soja. Hipótese ainda não confirmada: o ponto de sexta só entra na API com o Boletim Semanal de segunda às 17:00. Para confirmar, compare a API na sexta à noite e na segunda à noite.
+O Informe de Semeadura de soja de sexta 30/10/2026 (15:00) estava no calendário, mas no domingo 01/11 a API ainda tinha 23/10 como último ponto do plantio de soja. Hipótese ainda não confirmada: o ponto de sexta só entra na API com o Boletim Semanal de segunda às 17:00.
 
-Em 01/11/2026 (domingo), `DataAgricultura` dizia 30/10, mas o último ponto do plantio de soja era o de 23/10. Ou seja, o ponto da sexta-feira X ainda não estava publicado dois dias depois. Para medir o atraso de verdade, é preciso registrar quando cada ponto aparece pela primeira vez (um `first_seen_at` por linha), já que a API não informa.
+Desde 01/11/2026, cada ponto das séries de avanço guarda `first_seen_at`, o horário da primeira execução que o encontrou. `first_seen_at - date` dá o atraso de publicação, com a precisão da execução diária das 19:00. Pontos anteriores a essa data ficam com `first_seen_at` vazio, porque não se sabe quando apareceram.
+
+Em 01/11/2026 (domingo), `DataAgricultura` dizia 30/10, mas o último ponto do plantio de soja era o de 23/10. Ou seja, o ponto da sexta-feira ainda não estava publicado dois dias depois.
 
 ### Atualização da base local
 
-Não há agendamento para este projeto (o crontab só tem o CVM_research). A base local foi atualizada pela última vez em 18/10/2026. Uma execução incremental leva menos de 1 minuto, então rodar diariamente é barato, captura as cotações diárias (que o endpoint de cotações não guarda) e pega cada ponto semanal assim que ele sai.
+Desde 01/11/2026 um agente do launchd roda o modo incremental de segunda a sexta às 19:00 (ver README). Uma execução leva menos de 1 minuto, então rodar diariamente é barato, captura as cotações diárias (que o endpoint de cotações não guarda) e pega cada ponto semanal assim que ele sai. O cron não serve neste Mac: as permissões do macOS bloqueiam o acesso aos arquivos ("Operation not permitted").

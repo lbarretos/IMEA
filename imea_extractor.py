@@ -3,23 +3,21 @@
 IMEA Direct Data Extractor
 Extracts agricultural data from IMEA API using direct endpoints (no email workflow)
 
-This extractor uses the discovered working endpoints:
-1. /api/safra/seriehistoricageral - for harvest/season IDs
-2. /api/seriehistorica - for historical series data with specific indicators
+Endpoints used:
+1. /api/seriehistorica - progress series (planting, harvest, commercialization) by indicator ID
+2. /api/v2/mobile/cadeias/{id}/cotacoes - latest value of every quote/cost/estimate per chain
+See docs/SOURCE_NOTES.md for what the API does and does not provide.
 """
 
 from typing import Dict, List, Optional, Any, Union
 import pandas as pd
 import requests
+from urllib3.util.retry import Retry
 import ssl
 import logging
 from datetime import datetime, timedelta
-import json
-import asyncio
-import aiohttp
 import concurrent.futures
 import os
-import sys
 import sqlite3
 import argparse
 import shutil
@@ -48,8 +46,17 @@ class BaseExtractor:
 # /api/seriehistorica returns at most this many rows per request, whatever pageSize says
 API_ROW_CAP = 10
 
+# Seconds to wait for any single IMEA response (retries come on top, see TLSAdapter)
+HTTP_TIMEOUT = 30
+
 # Activities whose series must rise monotonically to 100% within a season
 CUMULATIVE_ACTIVITIES = ('Planting', 'Harvest')
+
+# Cache of IndicadorFinalId -> name; the quotes endpoint only gives the numeric ID
+INDICATOR_NAMES_FILE = 'BR_IMEA_INDICATOR_NAMES.csv'
+
+# IDs with no name (empty indicators) are looked up again after this many days
+INDICATOR_NAME_RETRY_DAYS = 30
 
 # Credential management functions
 def get_credentials_from_env() -> Dict[str, str]:
@@ -146,12 +153,20 @@ def save_dataset(df: pd.DataFrame,
                 for col in merge_on:
                     if col.endswith('Id') and col in combined_df.columns:
                         combined_df[col] = combined_df[col].astype('string')
+                if 'first_seen_at' in df.columns:
+                    # A key keeps the timestamp of its first appearance; later revisions don't reset it.
+                    # Rows saved before this column existed stay empty (first appearance unknown).
+                    if 'first_seen_at' not in existing_df.columns:
+                        combined_df.loc[:len(existing_df) - 1, 'first_seen_at'] = pd.NA
+                    combined_df['first_seen_at'] = combined_df.groupby(merge_on, dropna=False)['first_seen_at'].transform(lambda s: s.iloc[0])
                 combined_df = combined_df.drop_duplicates(subset=merge_on, keep='last')
                 if 'date' in combined_df.columns:
                     combined_df = combined_df.sort_values('date').reset_index(drop=True)
                 df = combined_df
             except Exception as merge_err:
-                logging.warning(f"⚠️ Could not merge with existing {filename}, overwriting: {merge_err}")
+                # Overwriting here would silently drop the whole history
+                logging.error(f"❌ Could not merge with existing {filename}; file left untouched: {merge_err}")
+                raise
                 
         df.to_csv(file_path, index=index)
         logging.info(f"✅ Dataset saved: {len(df)} records → {filename}")
@@ -166,6 +181,14 @@ class TLSAdapter(requests.adapters.HTTPAdapter):
     def __init__(self, *args, **kwargs):
         kwargs.setdefault('pool_connections', 25)
         kwargs.setdefault('pool_maxsize', 25)
+        # Every call is a read (POST included), so retrying transient failures is safe
+        kwargs.setdefault('max_retries', Retry(
+            total=3,
+            backoff_factor=2,
+            status_forcelist=(429, 500, 502, 503, 504),
+            allowed_methods=frozenset({'GET', 'POST'}),
+            raise_on_status=False,
+        ))
         super().__init__(*args, **kwargs)
         
     def init_poolmanager(self, *args, **kwargs):
@@ -189,7 +212,6 @@ class IMEADirectExtractor(BaseExtractor):
         self.name = "IMEA Direct Extractor"
         self.base_url = 'https://api1.imea.com.br'
         self.credentials = credentials
-        self.filename = 'BR_IMEA_CROP_PERCENTAGE_PROGRESS.csv'
         
         # Setup session with custom TLS adapter
         self.session = requests.Session()
@@ -218,7 +240,8 @@ class IMEADirectExtractor(BaseExtractor):
         }
         
         self.access_token = None
-        self.harvest_seasons = []
+        # Requests that still failed after retries; any entry makes the run exit non-zero
+        self.failures: List[str] = []
         
     def authenticate(self) -> bool:
         """Authenticate with IMEA API"""
@@ -241,7 +264,8 @@ class IMEADirectExtractor(BaseExtractor):
                 f'{self.base_url}/token',
                 headers=headers,
                 data=auth_data,
-                verify=True
+                verify=True,
+                timeout=HTTP_TIMEOUT
             )
             
             if response.status_code == 200:
@@ -262,79 +286,6 @@ class IMEADirectExtractor(BaseExtractor):
             self.logger.error(f"❌ Authentication error: {e}")
             
         return False
-
-    def fetch_harvest_seasons(self) -> List[Dict]:
-        """
-        Fetch all available harvest seasons using the seriehistoricageral endpoint
-        
-        Returns:
-            List of harvest season data
-        """
-        if not self.access_token:
-            self.logger.error("❌ No access token available")
-            return []
-            
-        self.logger.info("📅 Fetching harvest seasons...")
-        
-        headers = {
-            'accept': 'application/json, text/plain, */*',
-            'authorization': f'bearer {self.access_token}',
-            'content-type': 'application/json;charset=UTF-8',
-            'origin': 'https://portal.imea.com.br',
-            'referer': 'https://portal.imea.com.br/',
-            'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36'
-        }
-        
-        payload = {
-            "nome": "",
-            "pageSize": 100,  # Get more records
-            "page": 1,
-            "cadeia": [],
-            "grupo": [],
-            "indicador": [],
-            "estado": [],
-            "regiao": [],
-            "cidade": []
-        }
-        
-        try:
-            response = self.session.post(
-                f'{self.base_url}/api/safra/seriehistoricageral',
-                headers=headers,
-                json=payload,
-                verify=True,
-                timeout=30
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                
-                # Handle both direct list and paginated response
-                if isinstance(data, list):
-                    seasons = data
-                elif isinstance(data, dict) and 'data' in data:
-                    seasons = data['data']
-                else:
-                    seasons = []
-                
-                self.harvest_seasons = seasons
-                self.logger.info(f"✅ Retrieved {len(seasons)} harvest seasons")
-                
-                # Log season details
-                for season in seasons[:10]:  # Show first 10
-                    season_id = season.get('Id')
-                    season_name = season.get('Nome', 'Unknown')
-                    self.logger.info(f"   Season: {season_name} (ID: {season_id})")
-                
-                return seasons
-                
-            else:
-                self.logger.error(f"❌ Failed to fetch harvest seasons: {response.status_code}")
-                return []
-                
-        except Exception as e:
-            self.logger.error(f"❌ Error fetching harvest seasons: {e}")
-            return []
 
     def extract_historical_series(self, 
                                  start_date: Optional[str] = None,
@@ -358,18 +309,7 @@ class IMEADirectExtractor(BaseExtractor):
             
         self.logger.info("🚀 Extracting historical series data with MONTHLY granular requests and tipolocalidade=1...")
         
-        # Fetch harvest seasons first
-        harvest_seasons = self.fetch_harvest_seasons()
-        if not harvest_seasons:
-            self.logger.warning("⚠️ No harvest seasons found, proceeding without season filtering")
-        
-        # Extract season IDs
-        season_ids = [season.get('Id') for season in harvest_seasons if season.get('Id')]
-        self.logger.info(f"📅 Using {len(season_ids)} harvest seasons")
-        
-        # Define overall date range - start from 2021 for comprehensive data
-        from datetime import datetime, timedelta
-        
+        # Overall date range; the series start in 2023, 2021 leaves margin
         if start_date:
             start_dt = datetime.strptime(start_date, '%Y-%m-%d')
         else:
@@ -456,7 +396,7 @@ class IMEADirectExtractor(BaseExtractor):
                 "estadoDestino": [],
                 "regiaoDestino": [],
                 "cidadeDestino": [],
-                "safra": season_ids  # Use all available seasons
+                "safra": []  # /api/safra/seriehistoricageral returns no seasons, so no season filter
             }
             
             headers = {
@@ -474,7 +414,7 @@ class IMEADirectExtractor(BaseExtractor):
                     headers=headers,
                     json=payload,
                     verify=True,
-                    timeout=20  # Reasonable timeout for monthly requests
+                    timeout=HTTP_TIMEOUT
                 )
                 
                 if response.status_code == 200:
@@ -539,8 +479,6 @@ class IMEADirectExtractor(BaseExtractor):
         all_data = []
         max_workers = 15  # High concurrency for speed
         
-        import concurrent.futures
-        
         # Process requests in batches for progress tracking
         batch_size = 50  # Good balance for monthly requests
         
@@ -575,8 +513,10 @@ class IMEADirectExtractor(BaseExtractor):
                     else:
                         batch_results['failed'] += 1
                         error_info = result.get('request_info', {})
+                        failure = f"{error_info.get('crop', 'Unknown')} {error_info.get('activity', 'Unknown')} {error_info.get('start_date', '?')}..{error_info.get('end_date', '?')}: {result.get('error')}"
+                        self.failures.append(failure)
                         if batch_results['failed'] <= 5:  # Log first few failures
-                            self.logger.warning(f"⚠️ Failed: {error_info.get('crop', 'Unknown')} {error_info.get('activity', 'Unknown')} {error_info.get('month_label', 'Unknown')}")
+                            self.logger.warning(f"⚠️ Failed: {failure}")
                 
                 self.logger.info(f"✅ Batch {batch_num} completed: {batch_results['success']} success, {batch_results['failed']} failed, {batch_results['total_records']} records")
         
@@ -663,7 +603,7 @@ class IMEADirectExtractor(BaseExtractor):
             
         except Exception as e:
             self.logger.error(f"❌ Error creating percentage summary: {e}")
-            return df
+            raise  # a raw frame here would be saved with the wrong schema
 
     def extract_current_prices(self, chains: Optional[List[str]] = None) -> Optional[pd.DataFrame]:
         """
@@ -701,7 +641,8 @@ class IMEADirectExtractor(BaseExtractor):
                 response = self.session.get(
                     f'{self.base_url}{endpoint}',
                     headers=headers,
-                    verify=True
+                    verify=True,
+                    timeout=HTTP_TIMEOUT
                 )
                 
                 if response.status_code == 200:
@@ -719,9 +660,11 @@ class IMEADirectExtractor(BaseExtractor):
                         self.logger.warning(f"⚠️ No price data for chain {chain_id}")
                         
                 else:
+                    self.failures.append(f"prices chain {chain_id}: HTTP {response.status_code}")
                     self.logger.error(f"❌ Price request failed for chain {chain_id}: {response.status_code}")
-                    
+
             except Exception as e:
+                self.failures.append(f"prices chain {chain_id}: {e}")
                 self.logger.error(f"❌ Error extracting prices for chain {chain_id}: {e}")
         
         if all_data:
@@ -734,7 +677,80 @@ class IMEADirectExtractor(BaseExtractor):
         else:
             self.logger.warning("⚠️ No price data retrieved")
             return None
-    
+
+    def fetch_indicator_name(self, indicator_id: str) -> Optional[Dict[str, str]]:
+        """
+        Look up an indicator's name through /api/seriehistorica: any of its rows carries
+        IndicadorFinalNome. Returns {} when the indicator has no data (so no name), and
+        None when the request failed.
+        """
+        payload = {
+            "pageSize": API_ROW_CAP, "inicio": "2010-01-01",
+            "fim": (datetime.now() + timedelta(days=365)).strftime('%Y-%m-%d'),
+            "cadeia": [], "grupo": [], "indicador": [str(indicator_id)], "tipolocalidade": [],
+            "estado": [], "regiao": [], "cidade": [], "tipoDestino": [], "estadoDestino": [],
+            "regiaoDestino": [], "cidadeDestino": [], "safra": []
+        }
+        headers = {
+            'authorization': f'bearer {self.access_token}',
+            'content-type': 'application/json;charset=UTF-8'
+        }
+        try:
+            response = self.session.post(f'{self.base_url}/api/seriehistorica', headers=headers,
+                                         json=payload, verify=True, timeout=HTTP_TIMEOUT)
+            if response.status_code != 200:
+                return None
+            records = response.json()
+            if isinstance(records, dict):
+                records = records.get('data', [])
+            if not records:
+                return {}
+            return {
+                'indicator_name': records[0].get('IndicadorFinalNome'),
+                'indicator_group': records[0].get('IndicadorGrupoDescricao'),
+            }
+        except Exception:
+            return None
+
+    def update_indicator_names(self, indicator_ids: pd.Series) -> None:
+        """
+        Add names for price indicators not yet in INDICATOR_NAMES_FILE. Names are
+        descriptive only, so a failed lookup is logged and retried next run, never fatal.
+        """
+        path = os.path.join(ensure_datasets_dir(), INDICATOR_NAMES_FILE)
+        if os.path.exists(path):
+            cache = pd.read_csv(path, dtype={'IndicadorFinalId': str})
+        else:
+            cache = pd.DataFrame(columns=['IndicadorFinalId', 'indicator_name', 'indicator_group', 'looked_up_at'])
+
+        # Unnamed entries are indicators without data; give them another chance once in a while
+        retry_before = (datetime.now() - timedelta(days=INDICATOR_NAME_RETRY_DAYS)).strftime('%Y-%m-%d')
+        fresh = cache[cache['indicator_name'].notna() | (cache['looked_up_at'] >= retry_before)]
+        wanted = set(indicator_ids.dropna().astype(str)) - set(fresh['IndicadorFinalId'])
+        if not wanted:
+            return
+
+        self.logger.info(f"🏷️  Looking up names for {len(wanted)} indicators...")
+        looked_up_at = datetime.now().strftime('%Y-%m-%d')
+        rows, failed = [], 0
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            futures = {executor.submit(self.fetch_indicator_name, i): i for i in sorted(wanted)}
+            for future in concurrent.futures.as_completed(futures):
+                result = future.result()
+                if result is None:
+                    failed += 1
+                    continue
+                rows.append({'IndicadorFinalId': futures[future], **result, 'looked_up_at': looked_up_at})
+        if failed:
+            self.logger.warning(f"⚠️ Could not look up {failed} indicator names; will retry next run")
+
+        if rows:
+            new = pd.DataFrame(rows)
+            cache = pd.concat([cache[~cache['IndicadorFinalId'].isin(new['IndicadorFinalId'])], new], ignore_index=True)
+            cache.sort_values('IndicadorFinalId').to_csv(path, index=False)
+            named = new['indicator_name'].notna().sum()
+            self.logger.info(f"✅ Named {named} of {len(new)} indicators ({len(new) - named} have no data in the API)")
+
     def _transform_historical_data(self, df: pd.DataFrame) -> pd.DataFrame:
         """Transform and clean historical series data focusing on percentage metrics"""
         try:
@@ -788,7 +804,7 @@ class IMEADirectExtractor(BaseExtractor):
             
         except Exception as e:
             self.logger.error(f"❌ Error transforming historical data: {e}")
-            return df
+            raise  # a raw frame here would be saved with the wrong schema
     
     def _transform_price_data(self, df: pd.DataFrame) -> pd.DataFrame:
         """Transform and clean price data"""
@@ -824,7 +840,7 @@ class IMEADirectExtractor(BaseExtractor):
             
         except Exception as e:
             self.logger.error(f"❌ Error transforming price data: {e}")
-            return df
+            raise  # a raw frame here would be saved with the wrong schema
     
     def extract(self, **kwargs) -> Dict[str, Any]:
         """
@@ -883,6 +899,7 @@ class IMEADirectExtractor(BaseExtractor):
             if prices_df is not None:
                 results['data']['current_prices'] = prices_df
                 self.logger.info(f"💰 Current prices: {len(prices_df)} records")
+                self.update_indicator_names(prices_df['IndicadorFinalId'])
             else:
                 results['data']['current_prices'] = pd.DataFrame()
                 self.logger.warning("⚠️ No current prices data extracted")
@@ -939,7 +956,11 @@ class IMEADirectExtractor(BaseExtractor):
                     
                     # Rename the percentage column to just 'percentage' for clarity
                     clean_data = clean_data.rename(columns={percentage_col: 'percentage'})
-                    
+
+                    # When this run first saw each point; save_dataset keeps the earliest value per key,
+                    # so first_seen_at - date measures IMEA's publication lag
+                    clean_data['first_seen_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
                     # Sort by date
                     clean_data = clean_data.sort_values('date').reset_index(drop=True)
                     
@@ -1157,7 +1178,18 @@ class IMEADirectExtractor(BaseExtractor):
             # Export prices table if available
             prices_csv = os.path.join(datasets_dir, 'BR_IMEA_CURRENT_PRICES.csv')
             if os.path.exists(prices_csv):
-                prices_df = pd.read_csv(prices_csv)
+                prices_df = pd.read_csv(prices_csv, dtype={'IndicadorFinalId': str})
+                names_csv = os.path.join(datasets_dir, INDICATOR_NAMES_FILE)
+                if os.path.exists(names_csv):
+                    names = pd.read_csv(names_csv, dtype={'IndicadorFinalId': str})
+                    names[['IndicadorFinalId', 'indicator_name', 'indicator_group']].to_sql(
+                        'indicators', conn, if_exists='replace', index=False)
+                    # Put the name right after the ID so a row reads on its own
+                    prices_df = prices_df.merge(names[['IndicadorFinalId', 'indicator_name']],
+                                                on='IndicadorFinalId', how='left')
+                    cols = list(prices_df.columns)
+                    cols.insert(1, cols.pop(cols.index('indicator_name')))
+                    prices_df = prices_df[cols]
                 prices_df.to_sql('crop_prices', conn, if_exists='replace', index=False)
                 cursor = conn.cursor()
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_prices_crop ON crop_prices (CadeiaNome);")
@@ -1326,8 +1358,8 @@ def parse_cli_args(args=None):
         help="Custom output directory for datasets"
     )
     
-    parsed_args, _ = parser.parse_known_args(args)
-    return parsed_args
+    # Strict parsing: a typo like --mdoe must stop the run, not silently fall back to defaults
+    return parser.parse_args(args)
 
 def run(cli_args=None):
     """Entry point for the extractor following the standard pattern and CLI options"""
@@ -1369,14 +1401,23 @@ def run(cli_args=None):
             end_date=end_date
         )
         
-        if results['success']:
-            extractor.save(
-                results['data'], 
-                export_sqlite=args.export_sqlite
-            )
-            return results['data']
-        else:
+        if not results['success']:
             raise ValueError(f"Extraction failed: {results.get('error', 'Unknown error')}")
+
+        # Merges are additive, so saving what did arrive is safe even if some requests failed
+        extractor.save(
+            results['data'],
+            export_sqlite=args.export_sqlite
+        )
+
+        if extractor.failures:
+            for failure in extractor.failures:
+                logging.error(f"❌ Request failed after retries: {failure}")
+            raise RuntimeError(
+                f"{len(extractor.failures)} request(s) failed after retries; "
+                "the data that did arrive was saved, the rest will be retried on the next run"
+            )
+        return results['data']
             
     except Exception as e:
         logging.error(f"Error running IMEA Direct extractor: {str(e)}")
