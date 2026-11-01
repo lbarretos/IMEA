@@ -1201,8 +1201,8 @@ class IMEADirectExtractor(BaseExtractor):
                         shutil.copy2(src, dst)
                         os.chmod(dst, 0o644)
                     except Exception as err:
-                        self.logger.debug(f"CSV sync failed for {fname}: {err}")
-            
+                        self.logger.warning(f"⚠️ CSV sync failed for {fname}: {err}")
+
             # Sync SQLite database
             db_src = os.path.join(datasets_dir, db_filename)
             if os.path.exists(db_src):
@@ -1211,8 +1211,24 @@ class IMEADirectExtractor(BaseExtractor):
                     shutil.copy2(db_src, db_dst)
                     os.chmod(db_dst, 0o644)
                 except Exception as err:
-                    self.logger.debug(f"DB sync failed: {err}")
-                    
+                    self.logger.warning(f"⚠️ DB sync failed: {err}")
+                # Older instructions pointed agents at datasets/imea.db; keep that path working
+                db_alias = os.path.join(shared_datasets, db_filename)
+                if not os.path.lexists(db_alias):
+                    os.symlink(os.path.join('..', db_filename), db_alias)
+
+            # Regenerate the agent-facing README so it never drifts from the data
+            template = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'docs', 'SHARED_README.md')
+            if os.path.exists(template):
+                with open(template, encoding='utf-8') as f:
+                    readme = f.read()
+                readme = readme.replace('{SHARED_DIR}', shared_dir).replace(
+                    '{UPDATED_AT}', datetime.now().strftime('%Y-%m-%d %H:%M'))
+                readme_path = os.path.join(shared_dir, 'README.md')
+                with open(readme_path, 'w', encoding='utf-8') as f:
+                    f.write(readme)
+                os.chmod(readme_path, 0o644)
+
             # Set directory permissions
             os.chmod(shared_dir, 0o755)
             os.chmod(shared_datasets, 0o755)

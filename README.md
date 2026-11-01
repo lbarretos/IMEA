@@ -143,7 +143,7 @@ launchctl print gui/$(id -u)/com.imea.daily-update
 ## 💾 Armazenamento e Compartilhamento
 Configurado no `.env` (veja `.env.example`):
 - `IMEA_DATASETS_DIR`: onde ficam os CSVs e o `imea.db` (padrão: `./datasets`). Pode apontar para um disco externo.
-- `IMEA_SHARED_DIR`: se definido, cada execução copia a base para essa pasta com leitura liberada para todos os usuários do Mac (útil para outras ferramentas e LLMs).
+- `IMEA_SHARED_DIR`: se definido, cada execução copia a base para essa pasta com leitura liberada para todos os usuários do Mac (útil para outras ferramentas e LLMs). Junto vai um `README.md` gerado a partir de [docs/SHARED_README.md](docs/SHARED_README.md), com caminhos, tabelas, calendário e exemplos de consulta para os agentes. Edite o modelo, não a cópia.
 
 ## 🏗️ Estrutura do Projeto
 
