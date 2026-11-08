@@ -15,6 +15,7 @@
   <array>
     <string>/bin/bash</string>
     <string>__PROJECT_DIR__/scripts/update_daily.sh</string>
+    <string>--se-vencido</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
@@ -31,8 +32,10 @@
     <dict><key>Weekday</key><integer>4</integer><key>Hour</key><integer>19</integer><key>Minute</key><integer>0</integer></dict>
     <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>19</integer><key>Minute</key><integer>0</integer></dict>
   </array>
+  <key>StartInterval</key>
+  <integer>14400</integer>
   <key>RunAtLoad</key>
-  <false/>
+  <true/>
   <!-- Logs fora de ~/Documents: o launchd abre esses arquivos antes do script rodar -->
   <key>StandardOutPath</key>
   <string>__HOME__/Library/Logs/imea/update.log</string>
