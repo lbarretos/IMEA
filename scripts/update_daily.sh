@@ -20,6 +20,29 @@ if [ -z "${IMEA_DATASETS_DIR:-}" ] && [ -f "$PROJECT_DIR/.env" ]; then
 fi
 DATASETS_DIR="${IMEA_DATASETS_DIR:-}"
 
+STAMP_FILE="$HOME/Library/Logs/imea/.ultimo_sucesso"
+MODO=sempre
+[ "${1:-}" = "--se-vencido" ] && MODO=se_vencido
+
+# Última janela esperada: o 19:00 de dia útil mais recente que já passou
+ultima_janela() {
+  local now t dow
+  now=$(date +%s)
+  for d in 0 1 2 3 4 5 6 7; do
+    t=$(date -v-"${d}"d -v19H -v0M -v0S +%s)
+    dow=$(date -r "$t" +%u)
+    [ "$dow" -le 5 ] && [ "$t" -le "$now" ] && { echo "$t"; return; }
+  done
+}
+
+if [ "$MODO" = se_vencido ]; then
+  ultimo=$(head -1 "$STAMP_FILE" 2>/dev/null | cut -d' ' -f1)
+  [[ "$ultimo" =~ ^[0-9]+$ ]] || ultimo=0
+  janela=$(ultima_janela)
+  if [ "$ultimo" -ge "$janela" ]; then exit 0; fi   # em dia: sai em silêncio
+  echo "=== $(date '+%Y-%m-%d %H:%M:%S') recuperando janela perdida de $(date -r "$janela" '+%F %T')"
+fi
+
 echo "=== $(date '+%Y-%m-%d %H:%M:%S') início"
 
 if [ -z "$DATASETS_DIR" ]; then
@@ -47,5 +70,6 @@ cd "$PROJECT_DIR" || exit 1
 "$PROJECT_DIR/.venv/bin/python" imea_extractor.py --mode incremental --output-dir "$DATASETS_DIR"
 status=$?
 
+[ "$status" -eq 0 ] && { mkdir -p "$(dirname "$STAMP_FILE")"; echo "$(date +%s) $(date '+%F %T')" >"$STAMP_FILE"; }
 echo "=== $(date '+%Y-%m-%d %H:%M:%S') fim (exit $status)"
 exit "$status"
