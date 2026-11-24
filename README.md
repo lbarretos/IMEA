@@ -98,6 +98,22 @@ Um agente do launchd roda `scripts/update_daily.sh` (modo incremental) de **segu
 - O script exige `IMEA_DATASETS_DIR` no `.env`. Se a pasta não existir (por exemplo, disco externo desmontado), ele aborta sem gravar nada. Antes de rodar, espera a rede por até 5 minutos.
 - Logs: `~/Library/Logs/imea/update.log`.
 
+### Notificações via Telegram (opcional)
+
+Ao término de cada atualização diária (sucesso ou falha), uma notificação pode ser enviada ao Telegram.
+
+1. Obtenha o **Token** com [@BotFather](https://t.me/BotFather) e seu **Chat ID** (ex: via [@userinfobot](https://t.me/userinfobot)).
+2. Configure as credenciais no `.env` do projeto ou globalmente em `~/.telegram_notifier.env`:
+   ```bash
+   TELEGRAM_BOT_TOKEN="123456789:ABCdefGHI..."
+   TELEGRAM_CHAT_ID="12345678"
+   ```
+3. Teste a conexão:
+   ```bash
+   .venv/bin/python scripts/notify_telegram.py --test
+   ```
+*(Caso não configurado, a notificação é silenciada automaticamente).*
+
 ```bash
 bash scripts/install_schedule.sh            # instalar ou atualizar
 bash scripts/install_schedule.sh --remove   # remover

@@ -70,6 +70,12 @@ cd "$PROJECT_DIR" || exit 1
 "$PROJECT_DIR/.venv/bin/python" imea_extractor.py --mode incremental --output-dir "$DATASETS_DIR"
 status=$?
 
-[ "$status" -eq 0 ] && { mkdir -p "$(dirname "$STAMP_FILE")"; echo "$(date +%s) $(date '+%F %T')" >"$STAMP_FILE"; }
+if [ "$status" -eq 0 ]; then
+  mkdir -p "$(dirname "$STAMP_FILE")"
+  echo "$(date +%s) $(date '+%F %T')" >"$STAMP_FILE"
+  "$PROJECT_DIR/.venv/bin/python" "$PROJECT_DIR/scripts/notify_telegram.py" --projeto "IMEA" --status "sucesso" --detalhes "Atualização diária incremental concluída com sucesso" 2>/dev/null || true
+else
+  "$PROJECT_DIR/.venv/bin/python" "$PROJECT_DIR/scripts/notify_telegram.py" --projeto "IMEA" --status "falha" --erros "Extrator IMEA falhou com exit code $status" --log-file "$HOME/Library/Logs/imea/update.log" 2>/dev/null || true
+fi
 echo "=== $(date '+%Y-%m-%d %H:%M:%S') fim (exit $status)"
 exit "$status"
